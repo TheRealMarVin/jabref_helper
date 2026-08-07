@@ -17,9 +17,10 @@ Python 3 is required.
 python main.py references.bib
 ```
 
-The original file is left unchanged. The cleaned file is saved beside it as
-`references_fixed.bib`. If that name already exists, a number is added to the
-new filename.
+The original file is copied beside it as `references_old.bib`, and the cleaned
+content replaces `references.bib`. If the backup name already exists, a number
+is added (for example, `references_old_2.bib`) so no earlier backup is
+overwritten.
 
 Linked PDFs are only renamed when they are in the same folder as the BibTeX
 file.

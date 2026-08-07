@@ -2,18 +2,19 @@
 """
 Fix JabRef keys such as 2024 or 2024b.
 
-Version 2.2: removes entries with duplicate titles and promotes collaborator
-to author when author is absent.
+Version 2.3: backs up the original file and cleans it in place.
 
 Usage:
     python fix_jabref_bib.py references.bib
 
-The original .bib file is preserved. The script writes references_fixed.bib.
+The original .bib file is copied to references_old.bib, and the cleaned data
+is written back to references.bib.
 Linked PDFs are renamed only when they are directly beside the .bib file.
 """
 
 import argparse
 import re
+import shutil
 import sys
 import unicodedata
 from pathlib import Path
@@ -434,26 +435,26 @@ def rename_linked_pdfs(entry_text, old_key, new_key, folder):
     return new_entry, renamed, warnings
 
 
-def choose_output_path(input_path):
-    output = input_path.with_name(
-        input_path.stem + "_fixed" + input_path.suffix
+def choose_backup_path(input_path):
+    backup = input_path.with_name(
+        input_path.stem + "_old" + input_path.suffix
     )
     number = 2
 
-    while output.exists():
-        output = input_path.with_name(
+    while backup.exists():
+        backup = input_path.with_name(
             input_path.stem
-            + "_fixed_"
+            + "_old_"
             + str(number)
             + input_path.suffix
         )
         number += 1
 
-    return output
+    return backup
 
 
 def main():
-    version = "2.2"
+    version = "2.3"
     parser = argparse.ArgumentParser()
     parser.add_argument("bib_file", help="BibTeX file to process")
     arguments = parser.parse_args()
@@ -474,6 +475,10 @@ def main():
         changes, warnings = plan_changes(retained_entries)
         replacements = []
         renamed_files = []
+
+        # Preserve the exact input file before changing it or linked PDFs.
+        backup_path = choose_backup_path(input_path)
+        shutil.copy2(input_path, backup_path)
 
         for duplicate in duplicate_titles:
             entry = duplicate["entry"]
@@ -512,14 +517,14 @@ def main():
         for start, end, replacement in reversed(replacements):
             text = text[:start] + replacement + text[end:]
 
-        output_path = choose_output_path(input_path)
-        output_path.write_text(text, encoding=encoding, newline="")
+        input_path.write_text(text, encoding=encoding, newline="")
     except (OSError, UnicodeError, ValueError) as error:
         print("Error: " + str(error), file=sys.stderr)
         return 1
 
     print("fix_jabref_bib version " + version)
-    print("Output: " + str(output_path))
+    print("Backup: " + str(backup_path))
+    print("Updated: " + str(input_path))
     key_changes = [
         change
         for change in changes
