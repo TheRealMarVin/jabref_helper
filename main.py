@@ -2,7 +2,7 @@
 """
 Fix JabRef keys such as 2024 or 2024b.
 
-Version 2.3: backs up the original file and cleans it in place.
+Version 2.4: merges duplicate entries before removing the redundant copies.
 
 Usage:
     python fix_jabref_bib.py references.bib
@@ -78,6 +78,7 @@ def find_entries(text):
                 "start": start,
                 "end": end,
                 "text": entry_text,
+                "original_text": entry_text,
                 "key": raw_key.strip(),
                 "key_start": key_start + left,
                 "key_end": comma - right,
@@ -263,8 +264,206 @@ def normalized_title(value):
     return " ".join(value.split()).casefold()
 
 
+def find_fields(entry_text):
+    """Return all fields in an entry, including their value positions."""
+    opening = entry_text.find("{")
+    if opening == -1:
+        return []
+
+    key_comma = entry_text.find(",", opening + 1)
+    if key_comma == -1:
+        return []
+
+    fields = []
+    position = key_comma + 1
+    closing = len(entry_text) - 1
+
+    while position < closing:
+        while position < closing and (
+            entry_text[position].isspace() or entry_text[position] == ","
+        ):
+            position += 1
+
+        if position >= closing:
+            break
+
+        name_match = re.match(r"[A-Za-z][A-Za-z0-9_:-]*", entry_text[position:])
+        if name_match is None:
+            # Be tolerant of comments or syntax that this small parser does
+            # not understand; continue at the next line.
+            newline = entry_text.find("\n", position)
+            if newline == -1:
+                break
+            position = newline + 1
+            continue
+
+        name_start = position
+        name = name_match.group(0)
+        position += len(name)
+        while position < closing and entry_text[position].isspace():
+            position += 1
+        if position >= closing or entry_text[position] != "=":
+            continue
+
+        position += 1
+        while position < closing and entry_text[position].isspace():
+            position += 1
+        if position >= closing:
+            break
+
+        delimiter = entry_text[position]
+        if delimiter == "{":
+            depth = 1
+            escaped = False
+            value_start = position + 1
+            position += 1
+            while position < closing and depth:
+                character = entry_text[position]
+                if escaped:
+                    escaped = False
+                elif character == "\\":
+                    escaped = True
+                elif character == "{":
+                    depth += 1
+                elif character == "}":
+                    depth -= 1
+                position += 1
+            if depth:
+                raise ValueError("Unclosed field: " + name)
+            value_end = position - 1
+        elif delimiter == '"':
+            escaped = False
+            value_start = position + 1
+            position += 1
+            while position < closing:
+                character = entry_text[position]
+                if escaped:
+                    escaped = False
+                elif character == "\\":
+                    escaped = True
+                elif character == '"':
+                    break
+                position += 1
+            if position >= closing:
+                raise ValueError("Unclosed field: " + name)
+            value_end = position
+            position += 1
+        else:
+            value_start = position
+            depth = 0
+            while position < closing:
+                character = entry_text[position]
+                if character == "{":
+                    depth += 1
+                elif character == "}" and depth:
+                    depth -= 1
+                elif character == "," and depth == 0:
+                    break
+                position += 1
+            value_end = position
+            while value_end > value_start and entry_text[value_end - 1].isspace():
+                value_end -= 1
+
+        line_start = entry_text.rfind("\n", 0, name_start) + 1
+        indent = entry_text[line_start:name_start]
+        if not indent.isspace():
+            indent = "  "
+        fields.append(
+            {
+                "name": name,
+                "value": entry_text[value_start:value_end],
+                "start": value_start,
+                "end": value_end,
+                "indent": indent,
+            }
+        )
+
+    return fields
+
+
+def information_score(value):
+    """Estimate how much useful information a conflicting value contains."""
+    plain = re.sub(r"[{}\\\s]", "", value)
+    return (len(re.findall(r"[A-Za-z0-9]", plain)), len(value))
+
+
+def merge_list_values(first, second, separator):
+    """Combine delimited values without repeating identical items."""
+    items = []
+    seen = set()
+    for value in (first, second):
+        for item in value.split(separator):
+            item = item.strip()
+            normalized = " ".join(item.split()).casefold()
+            if item and normalized not in seen:
+                seen.add(normalized)
+                items.append(item)
+    return (separator + " ").join(items)
+
+
+def add_field(entry_text, name, value):
+    """Add a braced field just before an entry's closing brace."""
+    closing = entry_text.rfind("}")
+    if closing == -1:
+        raise ValueError("Could not find the end of a BibTeX entry")
+
+    fields = find_fields(entry_text)
+    indent = fields[-1]["indent"] if fields else "  "
+    before = entry_text[:closing].rstrip()
+    if not before.endswith(","):
+        before += ","
+    return before + "\n" + indent + name + " = {" + value + "},\n" + entry_text[closing:]
+
+
+def merge_entries(retained_text, duplicate_text):
+    """Merge duplicate fields into the retained entry."""
+    added = []
+    enriched = []
+
+    for incoming in find_fields(duplicate_text):
+        fields_by_name = {
+            field["name"].casefold(): field
+            for field in find_fields(retained_text)
+        }
+        name = incoming["name"].casefold()
+        current = fields_by_name.get(name)
+
+        if current is None:
+            retained_text = add_field(
+                retained_text,
+                incoming["name"],
+                incoming["value"],
+            )
+            added.append(incoming["name"])
+            continue
+
+        old_value = current["value"]
+        new_value = incoming["value"]
+        if " ".join(old_value.split()).casefold() == " ".join(new_value.split()).casefold():
+            continue
+
+        if name == "file":
+            merged_value = merge_list_values(old_value, new_value, ";")
+        elif name in {"keywords", "groups"}:
+            merged_value = merge_list_values(old_value, new_value, ",")
+        elif information_score(new_value) > information_score(old_value):
+            merged_value = new_value
+        else:
+            merged_value = old_value
+
+        if merged_value != old_value:
+            retained_text = (
+                retained_text[:current["start"]]
+                + merged_value
+                + retained_text[current["end"]:]
+            )
+            enriched.append(incoming["name"])
+
+    return retained_text, added, enriched
+
+
 def find_duplicate_titles(entries):
-    """Keep the first entry for each title and return later duplicates."""
+    """Merge equal-title entries, keeping the first and removing the rest."""
     seen_titles = {}
     retained = []
     duplicates = []
@@ -277,11 +476,19 @@ def find_duplicate_titles(entries):
 
         normalized = normalized_title(title["value"])
         if normalized in seen_titles:
+            retained_entry = seen_titles[normalized]
+            merged_text, added, enriched = merge_entries(
+                retained_entry["text"],
+                entry["text"],
+            )
+            retained_entry["text"] = merged_text
             duplicates.append(
                 {
                     "entry": entry,
                     "title": " ".join(title["value"].split()),
-                    "kept_key": seen_titles[normalized]["key"],
+                    "kept_key": retained_entry["key"],
+                    "added_fields": added,
+                    "enriched_fields": enriched,
                 }
             )
         else:
@@ -454,7 +661,7 @@ def choose_backup_path(input_path):
 
 
 def main():
-    version = "2.3"
+    version = "2.4"
     parser = argparse.ArgumentParser()
     parser.add_argument("bib_file", help="BibTeX file to process")
     arguments = parser.parse_args()
@@ -484,10 +691,14 @@ def main():
             entry = duplicate["entry"]
             replacements.append((entry["start"], entry["end"], ""))
 
+        updated_entries = {
+            entry["start"]: entry["text"] for entry in retained_entries
+        }
+
         for change in changes:
             entry = change["entry"]
             new_key = change["new_key"]
-            new_entry = entry["text"]
+            new_entry = updated_entries[entry["start"]]
 
             if change["promote_collaborator"]:
                 new_entry = promote_collaborator_to_author(new_entry)
@@ -510,11 +721,20 @@ def main():
                     + new_entry[entry["key_end"]:]
                 )
 
-            replacements.append((entry["start"], entry["end"], new_entry))
+            updated_entries[entry["start"]] = new_entry
             renamed_files.extend(renamed)
             warnings.extend(pdf_warnings)
 
-        for start, end, replacement in reversed(replacements):
+        for entry in retained_entries:
+            new_entry = updated_entries[entry["start"]]
+            if new_entry != entry["original_text"]:
+                replacements.append((entry["start"], entry["end"], new_entry))
+
+        for start, end, replacement in sorted(
+            replacements,
+            key=lambda item: item[0],
+            reverse=True,
+        ):
             text = text[:start] + replacement + text[end:]
 
         input_path.write_text(text, encoding=encoding, newline="")
@@ -558,13 +778,24 @@ def main():
         )
 
     for duplicate in duplicate_titles:
+        merge_details = []
+        if duplicate["added_fields"]:
+            merge_details.append(
+                "added " + ", ".join(duplicate["added_fields"])
+            )
+        if duplicate["enriched_fields"]:
+            merge_details.append(
+                "enriched " + ", ".join(duplicate["enriched_fields"])
+            )
+        details = "; " + "; ".join(merge_details) if merge_details else ""
         print(
             "  Duplicate title: "
             + duplicate["entry"]["key"]
-            + " removed; kept "
+            + " merged into and removed; kept "
             + duplicate["kept_key"]
             + " ("
             + duplicate["title"]
+            + details
             + ")"
         )
 

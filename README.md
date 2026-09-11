@@ -6,7 +6,8 @@ It:
 
 - replaces citation keys such as `2024` with an author and year key
 - changes `collaborator` to `author` when an author is missing
-- removes entries with duplicate titles, keeping the first one
+- merges entries with duplicate titles to preserve their fields, then removes
+  the redundant entry
 - renames linked PDF files when their citation key changes
 
 ## Usage
