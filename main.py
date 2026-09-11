@@ -2,7 +2,7 @@
 """
 Fix JabRef keys such as 2024 or 2024b.
 
-Version 2.4: merges duplicate entries before removing the redundant copies.
+Version 2.5: generates a citation key when an entry does not have one.
 
 Usage:
     python fix_jabref_bib.py references.bib
@@ -511,6 +511,8 @@ def plan_changes(entries):
 
     for entry in entries:
         old_key = entry["key"]
+        missing_key = not old_key
+        key_label = old_key if old_key else "<missing key>"
         author = find_field(entry["text"], "author")
         collaborator = find_field(entry["text"], "collaborator")
         promote_collaborator = author is None and collaborator is not None
@@ -520,32 +522,70 @@ def plan_changes(entries):
         author_source = author if author is not None else collaborator
         new_key = old_key
 
-        if YEAR_KEY.fullmatch(old_key):
+        if missing_key or YEAR_KEY.fullmatch(old_key):
             year = find_field(entry["text"], "year")
 
             if author_source is None:
-                warnings.append(
-                    old_key
-                    + ": missing author and collaborator; entry left unchanged."
-                )
-                used_keys.add(old_key.lower())
+                if missing_key:
+                    surname = "unknown"
+                    warnings.append(
+                        key_label
+                        + ": missing author and collaborator; used 'unknown' "
+                        "in the generated citation key."
+                    )
+                else:
+                    warnings.append(
+                        key_label
+                        + ": missing author and collaborator; entry left unchanged."
+                    )
+                    used_keys.add(old_key.lower())
+                    surname = ""
             else:
                 surname = first_author_surname(author_source["value"])
                 if not surname:
-                    warnings.append(
-                        old_key
-                        + ": could not determine the surname; citation key left unchanged."
-                    )
-                    used_keys.add(old_key.lower())
-                else:
-                    year_match = None
-                    if year is not None:
-                        year_match = re.search(r"\b(\d{4})\b", year["value"])
-                    if year_match is None:
-                        year_match = re.search(r"\b(\d{4})\b", old_key)
+                    if missing_key:
+                        surname = "unknown"
+                        warnings.append(
+                            key_label
+                            + ": could not determine the surname; used 'unknown' "
+                            "in the generated citation key."
+                        )
+                    else:
+                        warnings.append(
+                            key_label
+                            + ": could not determine the surname; citation key left unchanged."
+                        )
+                        used_keys.add(old_key.lower())
 
+            if surname:
+                year_match = None
+                if year is not None:
+                    year_match = re.search(r"\b(\d{4})\b", year["value"])
+                if year_match is None:
+                    year_match = re.search(r"\b(\d{4})\b", old_key)
+
+                if year_match is None:
+                    if missing_key:
+                        year_part = "nodate"
+                        warnings.append(
+                            key_label
+                            + ": missing publication year; used 'nodate' in the "
+                            "generated citation key."
+                        )
+                    else:
+                        year_part = ""
+                        warnings.append(
+                            key_label
+                            + ": could not determine the publication year; "
+                            "citation key left unchanged."
+                        )
+                        used_keys.add(old_key.lower())
+                else:
+                    year_part = year_match.group(1)
+
+                if year_part:
                     new_key = unique_key(
-                        surname + year_match.group(1),
+                        surname + year_part,
                         used_keys,
                     )
 
@@ -661,7 +701,7 @@ def choose_backup_path(input_path):
 
 
 def main():
-    version = "2.4"
+    version = "2.5"
     parser = argparse.ArgumentParser()
     parser.add_argument("bib_file", help="BibTeX file to process")
     arguments = parser.parse_args()

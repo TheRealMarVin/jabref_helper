@@ -4,6 +4,8 @@ A small Python script for cleaning up JabRef BibTeX files.
 
 It:
 
+- generates missing citation keys from the first author's surname and the
+  publication year
 - replaces citation keys such as `2024` with an author and year key
 - changes `collaborator` to `author` when an author is missing
 - merges entries with duplicate titles to preserve their fields, then removes
